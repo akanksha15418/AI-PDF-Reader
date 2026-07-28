@@ -23,7 +23,7 @@ export default function App() {
     fileName: null,
     questionsAsked: 0,
     chunksCreated: 0,
-    aiModel: 'Google Gemini 1.5 Flash',
+    aiModel: 'Google Gemini',
     recentQuestions: []
   });
 

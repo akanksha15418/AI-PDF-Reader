@@ -3,6 +3,8 @@ package com.aipdf.chat.service;
 import com.aipdf.chat.dto.AskResponse;
 import com.aipdf.chat.dto.StatsResponse;
 import com.aipdf.chat.dto.UploadResponse;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.document.Document;
 import dev.langchain4j.data.document.splitter.DocumentSplitters;
 import dev.langchain4j.data.embedding.Embedding;
@@ -14,13 +16,15 @@ import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -31,25 +35,27 @@ import java.util.stream.Collectors;
  * 2. Text Chunking (LangChain4j DocumentSplitter)
  * 3. Embeddings Generation & Storage (InMemoryEmbeddingStore)
  * 4. Semantic Search Retrieval
- * 5. Gemini API Answer Generation
+ * 5. Dynamic Google AI Studio Model Discovery (ListModels API) & Gemini Q&A
  */
 @Service
 public class PdfRagService {
 
+    private static final Logger log = LoggerFactory.getLogger(PdfRagService.class);
+
     private final InMemoryEmbeddingStore<TextSegment> embeddingStore;
     private final EmbeddingModel embeddingModel;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final RestTemplate restTemplate = new RestTemplate();
 
     @Value("${langchain4j.googleai.api-key:demo-key}")
     private String defaultApiKey;
-
-    @Value("${langchain4j.googleai.model-name:gemini-1.5-flash}")
-    private String defaultModelName;
 
     // In-memory session stats
     private boolean pdfUploaded = false;
     private String currentFileName = null;
     private int questionsAskedCount = 0;
     private int chunksCount = 0;
+    private String activeModelUsed = "Google Gemini (Auto-Discovered)";
     private final LinkedList<String> recentQuestions = new LinkedList<>();
 
     public PdfRagService(InMemoryEmbeddingStore<TextSegment> embeddingStore, EmbeddingModel embeddingModel) {
@@ -84,13 +90,9 @@ public class PdfRagService {
             throw new IllegalArgumentException("Could not create text chunks from the uploaded PDF.");
         }
 
-        // 3. Clear existing store items and re-ingest
-        // InMemoryEmbeddingStore can be re-initialized by embedding new segments
-        // We embed each segment and add to store
+        // 3. Embed each segment and add to InMemoryEmbeddingStore
         List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
         
-        // Remove all previous segments if any
-        // InMemoryEmbeddingStore allows adding embeddings with segments
         for (int i = 0; i < segments.size(); i++) {
             embeddingStore.add(embeddings.get(i), segments.get(i));
         }
@@ -105,7 +107,7 @@ public class PdfRagService {
     }
 
     /**
-     * Processes user questions using RAG (Semantic search + Google Gemini API).
+     * Processes user questions using RAG (Semantic search + Dynamic Gemini API model discovery).
      */
     public synchronized AskResponse askQuestion(String question, String providedApiKey) {
         if (!pdfUploaded || chunksCount == 0) {
@@ -150,7 +152,7 @@ public class PdfRagService {
                 ? providedApiKey.trim() 
                 : System.getenv("GEMINI_API_KEY");
 
-        if (apiKeyToUse == null || apiKeyToUse.trim().isEmpty() || "demo-key".equals(defaultApiKey) && (apiKeyToUse == null)) {
+        if (apiKeyToUse == null || apiKeyToUse.trim().isEmpty()) {
             apiKeyToUse = defaultApiKey;
         }
 
@@ -158,25 +160,53 @@ public class PdfRagService {
             throw new IllegalStateException("Google Gemini API Key is missing. Please configure GEMINI_API_KEY or provide your API key in the app.");
         }
 
-        // 5. Invoke Google Gemini Model via LangChain4j
-        String aiAnswer;
-        try {
-            GoogleAiGeminiChatModel geminiModel = GoogleAiGeminiChatModel.builder()
-                    .apiKey(apiKeyToUse)
-                    .modelName(defaultModelName)
-                    .temperature(0.2)
-                    .build();
-
-            aiAnswer = geminiModel.generate(systemPrompt);
-        } catch (Exception e) {
-            throw new RuntimeException("Error communicating with Gemini API: " + e.getMessage(), e);
+        // 5. Query Google AI Studio ListModels API to dynamically discover supported models for this key
+        List<String> discoveredModels = queryListModels(apiKeyToUse);
+        
+        if (discoveredModels.isEmpty()) {
+            throw new RuntimeException("Error communicating with Gemini API: No models supporting generateContent found for your API key. Verify key permissions at https://aistudio.google.com/app/apikey");
         }
 
-        // 6. Update Session Stats
+        log.info("ListModels returned available generateContent models: {}", discoveredModels);
+        System.out.println("[ListModels] Discovered supported models for API key: " + discoveredModels);
+
+        // 6. Invoke Google Gemini Chat Model using the first dynamically discovered model
+        String aiAnswer = null;
+        Exception lastException = null;
+        String modelNameUsed = null;
+
+        for (String candidateModel : discoveredModels) {
+            try {
+                log.info("Attempting generation using model: {}", candidateModel);
+                GoogleAiGeminiChatModel geminiModel = GoogleAiGeminiChatModel.builder()
+                        .apiKey(apiKeyToUse)
+                        .modelName(candidateModel)
+                        .temperature(0.2)
+                        .build();
+
+                aiAnswer = geminiModel.generate(systemPrompt);
+                if (aiAnswer != null && !aiAnswer.trim().isEmpty()) {
+                    modelNameUsed = candidateModel;
+                    this.activeModelUsed = "Google Gemini (" + candidateModel + ")";
+                    break;
+                }
+            } catch (Exception e) {
+                log.warn("Model '{}' failed during generateContent: {}", candidateModel, e.getMessage());
+                if (lastException == null) {
+                    lastException = e;
+                }
+            }
+        }
+
+        if (aiAnswer == null) {
+            throw new RuntimeException("Error communicating with Gemini API: " + 
+                    (lastException != null ? lastException.getMessage() : "Unable to generate response"), lastException);
+        }
+
+        // 7. Update Session Stats
         this.questionsAskedCount++;
         
-        // Add to recent questions (max 5)
-        recentQuestions.remove(question.trim()); // avoid duplicate contiguous display
+        recentQuestions.remove(question.trim());
         recentQuestions.addFirst(question.trim());
         while (recentQuestions.size() > 5) {
             recentQuestions.removeLast();
@@ -184,6 +214,52 @@ public class PdfRagService {
 
         StatsResponse stats = getStats();
         return new AskResponse(question, aiAnswer, retrievedSnippets, stats);
+    }
+
+    /**
+     * Dynamically queries the Google AI Studio ListModels API (v1beta) and returns
+     * all model names supporting content generation for the provided API Key.
+     */
+    private List<String> queryListModels(String apiKey) {
+        List<String> supportedModels = new ArrayList<>();
+        String url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey;
+
+        try {
+            String jsonResponse = restTemplate.getForObject(url, String.class);
+            if (jsonResponse != null) {
+                JsonNode rootNode = objectMapper.readTree(jsonResponse);
+                JsonNode modelsNode = rootNode.get("models");
+
+                if (modelsNode != null && modelsNode.isArray()) {
+                    for (JsonNode modelNode : modelsNode) {
+                        String rawName = modelNode.has("name") ? modelNode.get("name").asText() : "";
+                        JsonNode methodsNode = modelNode.get("supportedGenerationMethods");
+
+                        boolean supportsGenerate = false;
+                        if (methodsNode != null && methodsNode.isArray()) {
+                            for (JsonNode method : methodsNode) {
+                                if ("generateContent".equalsIgnoreCase(method.asText())) {
+                                    supportsGenerate = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (supportsGenerate && rawName.startsWith("models/")) {
+                            String modelIdentifier = rawName.substring("models/".length());
+                            // Exclude specialized preview/embedding/imagen models if standard chat is desired
+                            if (modelIdentifier.contains("gemini") && !modelIdentifier.contains("embedding") && !modelIdentifier.contains("robotics")) {
+                                supportedModels.add(modelIdentifier);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("Failed to query ListModels API: {}", e.getMessage());
+        }
+
+        return supportedModels;
     }
 
     /**
@@ -195,7 +271,7 @@ public class PdfRagService {
                 this.currentFileName,
                 this.questionsAskedCount,
                 this.chunksCount,
-                "Google Gemini (" + defaultModelName + ")",
+                this.activeModelUsed,
                 new ArrayList<>(this.recentQuestions)
         );
     }
@@ -208,6 +284,7 @@ public class PdfRagService {
         this.currentFileName = null;
         this.chunksCount = 0;
         this.questionsAskedCount = 0;
+        this.activeModelUsed = "Google Gemini (Auto-Discovered)";
         this.recentQuestions.clear();
     }
 }
