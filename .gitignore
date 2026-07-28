@@ -1,0 +1,21 @@
+# Build & Output Directories
+target/
+backend/target/
+frontend/dist/
+frontend/node_modules/
+
+# Environment & Secret files
+.env
+.env.local
+*.log
+
+# Temp test files
+sample.pdf
+ask_request.json
+
+# IDE & System files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
