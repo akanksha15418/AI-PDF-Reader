@@ -27,7 +27,7 @@ USER appuser
 
 # Default PORT environment variable (Render sets this dynamically at runtime)
 ENV PORT=8080
-ENV JAVA_OPTS="-Xms256m -Xmx512m"
+ENV JAVA_OPTS="-Xms64m -Xmx256m -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=64m -Xss256k -XX:+UseSerialGC"
 
 # Expose HTTP port
 EXPOSE 8080
