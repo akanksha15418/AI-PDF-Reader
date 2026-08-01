@@ -10,16 +10,13 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # ==========================================
-# Stage 2: Production Runtime Stage
+# Stage 2: Production Runtime Stage (Ubuntu Jammy JRE with full glibc for ONNX)
 # ==========================================
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 
-# Install native C++ libraries required by ONNX Runtime (libstdc++.so.6) on Alpine Linux
-RUN apk add --no-cache libstdc++ gcompat
-
 # Security: Create non-root user for container execution
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
 
 # Copy compiled jar artifact from builder stage
 COPY --from=builder /app/target/*.jar app.jar
