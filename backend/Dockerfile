@@ -23,7 +23,7 @@ COPY --from=builder /app/target/*.jar app.jar
 
 # Default PORT environment variable (Render sets this dynamically at runtime)
 ENV PORT=8080
-ENV JAVA_OPTS="-Xms128m -Xmx320m -XX:+UseSerialGC"
+ENV JAVA_OPTS="-Xms128m -Xmx256m -XX:+UseSerialGC"
 
 # Expose HTTP port
 EXPOSE 8080

@@ -43,10 +43,10 @@
             <version>${langchain4j.version}</version>
         </dependency>
 
-        <!-- LangChain4j Local Embedding Model (In-memory / ONNX) -->
+        <!-- LangChain4j Quantized Local Embedding Model (Lightweight 23MB ONNX) -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
-            <artifactId>langchain4j-embeddings-all-minilm-l6-v2</artifactId>
+            <artifactId>langchain4j-embeddings-all-minilm-l6-v2-q</artifactId>
             <version>${langchain4j.version}</version>
         </dependency>
 
