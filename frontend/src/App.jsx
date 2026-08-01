@@ -7,6 +7,18 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
+// Unique Per-Browser Tab Session Generator for Multi-User Privacy
+const getOrCreateSessionId = () => {
+  let id = sessionStorage.getItem('pdf_chat_session_id');
+  if (!id) {
+    id = 'sess_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+    sessionStorage.setItem('pdf_chat_session_id', id);
+  }
+  return id;
+};
+
+const SESSION_ID = getOrCreateSessionId();
+
 export default function App() {
   // State variables
   const [file, setFile] = useState(null);
@@ -56,10 +68,12 @@ export default function App() {
     localStorage.setItem('gemini_api_key', val);
   };
 
-  // Fetch initial stats
+  // Fetch initial stats for current isolated session
   const fetchStats = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/pdf/stats`);
+      const res = await fetch(`${API_BASE}/api/pdf/stats`, {
+        headers: { 'X-Session-Id': SESSION_ID }
+      });
       if (res.ok) {
         const data = await res.json();
         setStats(data);
@@ -99,7 +113,7 @@ export default function App() {
     }
   };
 
-  // Upload PDF handler
+  // Upload PDF handler for current isolated session
   const handleUpload = async (selectedFile) => {
     if (!selectedFile.name.toLowerCase().endsWith('.pdf')) {
       setError('Please select a valid PDF document (.pdf)');
@@ -116,6 +130,7 @@ export default function App() {
     try {
       const response = await fetch(`${API_BASE}/api/pdf/upload`, {
         method: 'POST',
+        headers: { 'X-Session-Id': SESSION_ID },
         body: formData,
       });
 
@@ -145,7 +160,7 @@ export default function App() {
     }
   };
 
-  // Ask question handler
+  // Ask question handler for current isolated session
   const handleAsk = async (e) => {
     if (e) e.preventDefault();
     const query = question.trim();
@@ -173,7 +188,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Gemini-Api-Key': apiKey
+          'X-Gemini-Api-Key': apiKey,
+          'X-Session-Id': SESSION_ID
         },
         body: JSON.stringify({ question: query, apiKey: apiKey })
       });
@@ -209,10 +225,13 @@ export default function App() {
     }
   };
 
-  // Reset session handler
+  // Reset session handler for current isolated session
   const handleReset = async () => {
     try {
-      await fetch(`${API_BASE}/api/pdf/reset`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/pdf/reset`, {
+        method: 'POST',
+        headers: { 'X-Session-Id': SESSION_ID }
+      });
       setFile(null);
       setSuccess(null);
       setError(null);

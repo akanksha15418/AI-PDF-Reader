@@ -14,10 +14,8 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * REST Controller exposing backend endpoints for AI PDF Chat Assistant:
- * - POST /upload (or /api/pdf/upload): Single PDF document upload & RAG ingestion
- * - POST /ask (or /api/pdf/ask): Semantic search + Gemini question answering
- * - GET /stats (or /api/pdf/stats): Dashboard session statistics
+ * REST Controller exposing backend endpoints for AI PDF Chat Assistant
+ * with Multi-User Session Isolation via X-Session-Id header.
  */
 @RestController
 public class PdfChatController {
@@ -29,12 +27,14 @@ public class PdfChatController {
     }
 
     /**
-     * Upload single PDF file and create embeddings.
+     * Upload single PDF file and create embeddings for current user session.
      */
     @PostMapping(value = {"/upload", "/api/pdf/upload"})
-    public ResponseEntity<?> uploadPdf(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<?> uploadPdf(
+            @RequestParam("file") MultipartFile file,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
         try {
-            UploadResponse response = pdfRagService.uploadAndIngestPdf(file);
+            UploadResponse response = pdfRagService.uploadAndIngestPdf(file, sessionId);
             return ResponseEntity.ok(response);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(createErrorResponse(e.getMessage()));
@@ -45,18 +45,19 @@ public class PdfChatController {
     }
 
     /**
-     * Ask question based on the uploaded PDF.
+     * Ask question based on the uploaded PDF for current user session.
      */
     @PostMapping(value = {"/ask", "/api/pdf/ask"})
     public ResponseEntity<?> askQuestion(
             @RequestBody AskRequest request,
-            @RequestHeader(value = "X-Gemini-Api-Key", required = false) String headerApiKey) {
+            @RequestHeader(value = "X-Gemini-Api-Key", required = false) String headerApiKey,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
         try {
             String apiKey = (request.getApiKey() != null && !request.getApiKey().trim().isEmpty())
                     ? request.getApiKey()
                     : headerApiKey;
 
-            AskResponse response = pdfRagService.askQuestion(request.getQuestion(), apiKey);
+            AskResponse response = pdfRagService.askQuestion(request.getQuestion(), apiKey, sessionId);
             return ResponseEntity.ok(response);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(createErrorResponse(e.getMessage()));
@@ -69,20 +70,22 @@ public class PdfChatController {
     }
 
     /**
-     * Fetch project statistics for dashboard.
+     * Fetch project statistics for current user session dashboard.
      */
     @GetMapping(value = {"/stats", "/api/pdf/stats"})
-    public ResponseEntity<StatsResponse> getStats() {
-        return ResponseEntity.ok(pdfRagService.getStats());
+    public ResponseEntity<StatsResponse> getStats(
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
+        return ResponseEntity.ok(pdfRagService.getStats(sessionId));
     }
 
     /**
-     * Optional endpoint to clear session and reset PDF store.
+     * Endpoint to clear session and reset PDF store for current user session.
      */
     @PostMapping(value = {"/reset", "/api/pdf/reset"})
-    public ResponseEntity<StatsResponse> resetSession() {
-        pdfRagService.resetSession();
-        return ResponseEntity.ok(pdfRagService.getStats());
+    public ResponseEntity<StatsResponse> resetSession(
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
+        pdfRagService.resetSession(sessionId);
+        return ResponseEntity.ok(pdfRagService.getStats(sessionId));
     }
 
     private Map<String, Object> createErrorResponse(String message) {

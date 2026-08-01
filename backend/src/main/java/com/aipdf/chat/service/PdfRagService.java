@@ -27,22 +27,19 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Core Service performing RAG (Retrieval-Augmented Generation) pipeline:
- * 1. PDF Text Extraction (Apache PDFBox)
- * 2. Text Chunking (LangChain4j DocumentSplitter)
- * 3. Embeddings Generation & Storage (InMemoryEmbeddingStore)
- * 4. Semantic Search Retrieval
- * 5. Dynamic Google AI Studio Model Discovery (ListModels API) & Gemini Q&A
+ * Core Service performing RAG (Retrieval-Augmented Generation) pipeline
+ * with Multi-User Session Isolation.
  */
 @Service
 public class PdfRagService {
 
     private static final Logger log = LoggerFactory.getLogger(PdfRagService.class);
 
-    private final InMemoryEmbeddingStore<TextSegment> embeddingStore;
     private final EmbeddingModel embeddingModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RestTemplate restTemplate = new RestTemplate();
@@ -50,26 +47,101 @@ public class PdfRagService {
     @Value("${langchain4j.googleai.api-key:demo-key}")
     private String defaultApiKey;
 
-    // In-memory session stats
-    private boolean pdfUploaded = false;
-    private String currentFileName = null;
-    private int questionsAskedCount = 0;
-    private int chunksCount = 0;
-    private String activeModelUsed = "Google Gemini (Auto-Discovered)";
-    private final LinkedList<String> recentQuestions = new LinkedList<>();
+    // Per-User Multi-Tenant Isolated Sessions
+    private final Map<String, UserSessionData> userSessions = new ConcurrentHashMap<>();
 
-    public PdfRagService(InMemoryEmbeddingStore<TextSegment> embeddingStore, EmbeddingModel embeddingModel) {
-        this.embeddingStore = embeddingStore;
+    public PdfRagService(EmbeddingModel embeddingModel) {
         this.embeddingModel = embeddingModel;
     }
 
     /**
-     * Handles single PDF upload, text parsing, chunk splitting, embedding generation, and storage.
+     * Inner class representing private session state for a specific user session.
      */
-    public synchronized UploadResponse uploadAndIngestPdf(MultipartFile file) throws IOException {
+    public static class UserSessionData {
+        private InMemoryEmbeddingStore<TextSegment> embeddingStore = new InMemoryEmbeddingStore<>();
+        private boolean pdfUploaded = false;
+        private String currentFileName = null;
+        private int questionsAskedCount = 0;
+        private int chunksCount = 0;
+        private String activeModelUsed = "Google Gemini (Auto-Discovered)";
+        private final LinkedList<String> recentQuestions = new LinkedList<>();
+
+        public InMemoryEmbeddingStore<TextSegment> getEmbeddingStore() {
+            return embeddingStore;
+        }
+
+        public boolean isPdfUploaded() {
+            return pdfUploaded;
+        }
+
+        public void setPdfUploaded(boolean pdfUploaded) {
+            this.pdfUploaded = pdfUploaded;
+        }
+
+        public String getCurrentFileName() {
+            return currentFileName;
+        }
+
+        public void setCurrentFileName(String currentFileName) {
+            this.currentFileName = currentFileName;
+        }
+
+        public int getQuestionsAskedCount() {
+            return questionsAskedCount;
+        }
+
+        public void incrementQuestionsAskedCount() {
+            this.questionsAskedCount++;
+        }
+
+        public int getChunksCount() {
+            return chunksCount;
+        }
+
+        public void setChunksCount(int chunksCount) {
+            this.chunksCount = chunksCount;
+        }
+
+        public String getActiveModelUsed() {
+            return activeModelUsed;
+        }
+
+        public void setActiveModelUsed(String activeModelUsed) {
+            this.activeModelUsed = activeModelUsed;
+        }
+
+        public LinkedList<String> getRecentQuestions() {
+            return recentQuestions;
+        }
+
+        public void reset() {
+            this.embeddingStore = new InMemoryEmbeddingStore<>();
+            this.pdfUploaded = false;
+            this.currentFileName = null;
+            this.chunksCount = 0;
+            this.questionsAskedCount = 0;
+            this.activeModelUsed = "Google Gemini (Auto-Discovered)";
+            this.recentQuestions.clear();
+        }
+    }
+
+    private UserSessionData getSession(String sessionId) {
+        String key = (sessionId != null && !sessionId.trim().isEmpty()) ? sessionId.trim() : "default-session";
+        return userSessions.computeIfAbsent(key, k -> new UserSessionData());
+    }
+
+    /**
+     * Handles single PDF upload and creates isolated vector embeddings for the specified user session.
+     */
+    public UploadResponse uploadAndIngestPdf(MultipartFile file, String sessionId) throws IOException {
         if (file.isEmpty() || file.getOriginalFilename() == null || !file.getOriginalFilename().toLowerCase().endsWith(".pdf")) {
             throw new IllegalArgumentException("Please upload a valid non-empty PDF file.");
         }
+
+        UserSessionData session = getSession(sessionId);
+
+        // Reset previous session data before ingesting new PDF
+        session.reset();
 
         // 1. Extract raw text using Apache PDFBox
         String extractedText;
@@ -82,7 +154,7 @@ public class PdfRagService {
             throw new IllegalArgumentException("The uploaded PDF file contains no readable text or is image-only.");
         }
 
-        // 2. Split text into chunks (e.g. 500 max characters per chunk, 50 overlap)
+        // 2. Split text into chunks (500 characters per chunk, 50 overlap)
         var splitter = DocumentSplitters.recursive(500, 50);
         List<TextSegment> segments = splitter.split(Document.from(extractedText));
 
@@ -90,27 +162,28 @@ public class PdfRagService {
             throw new IllegalArgumentException("Could not create text chunks from the uploaded PDF.");
         }
 
-        // 3. Embed each segment and add to InMemoryEmbeddingStore
+        // 3. Embed each segment into isolated user session store
         List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
-        
         for (int i = 0; i < segments.size(); i++) {
-            embeddingStore.add(embeddings.get(i), segments.get(i));
+            session.getEmbeddingStore().add(embeddings.get(i), segments.get(i));
         }
 
         // Update session stats
-        this.pdfUploaded = true;
-        this.currentFileName = file.getOriginalFilename();
-        this.chunksCount = segments.size();
+        session.setPdfUploaded(true);
+        session.setCurrentFileName(file.getOriginalFilename());
+        session.setChunksCount(segments.size());
 
-        StatsResponse stats = getStats();
-        return new UploadResponse(true, "PDF processed and embedded successfully!", this.currentFileName, this.chunksCount, stats);
+        StatsResponse stats = getStats(sessionId);
+        return new UploadResponse(true, "PDF processed and embedded successfully!", session.getCurrentFileName(), session.getChunksCount(), stats);
     }
 
     /**
-     * Processes user questions using RAG (Semantic search + Dynamic Gemini API model discovery).
+     * Processes user questions using isolated RAG for the user's session.
      */
-    public synchronized AskResponse askQuestion(String question, String providedApiKey) {
-        if (!pdfUploaded || chunksCount == 0) {
+    public AskResponse askQuestion(String question, String providedApiKey, String sessionId) {
+        UserSessionData session = getSession(sessionId);
+
+        if (!session.isPdfUploaded() || session.getChunksCount() == 0) {
             throw new IllegalStateException("Please upload a PDF document before asking questions.");
         }
 
@@ -118,11 +191,11 @@ public class PdfRagService {
             throw new IllegalArgumentException("Question cannot be empty.");
         }
 
-        // 1. Generate embedding for the question
+        // 1. Generate embedding for question
         Embedding questionEmbedding = embeddingModel.embed(question.trim()).content();
 
-        // 2. Perform semantic search retrieval in InMemoryEmbeddingStore
-        List<EmbeddingMatch<TextSegment>> relevantMatches = embeddingStore.findRelevant(questionEmbedding, 4, 0.3);
+        // 2. Perform semantic search retrieval in user's isolated InMemoryEmbeddingStore
+        List<EmbeddingMatch<TextSegment>> relevantMatches = session.getEmbeddingStore().findRelevant(questionEmbedding, 4, 0.3);
 
         List<String> retrievedSnippets = relevantMatches.stream()
                 .map(match -> match.embedded().text())
@@ -147,7 +220,7 @@ public class PdfRagService {
                 Answer:
                 """, contextBlock, question.trim());
 
-        // 4. Determine API Key to use (priority: header/provided key > environment variable > application.properties)
+        // 4. Determine API Key to use
         String apiKeyToUse = (providedApiKey != null && !providedApiKey.trim().isEmpty()) 
                 ? providedApiKey.trim() 
                 : System.getenv("GEMINI_API_KEY");
@@ -160,20 +233,16 @@ public class PdfRagService {
             throw new IllegalStateException("Google Gemini API Key is missing. Please configure GEMINI_API_KEY or provide your API key in the app.");
         }
 
-        // 5. Query Google AI Studio ListModels API to dynamically discover supported models for this key
+        // 5. Query Google AI Studio ListModels API
         List<String> discoveredModels = queryListModels(apiKeyToUse);
         
         if (discoveredModels.isEmpty()) {
             throw new RuntimeException("Error communicating with Gemini API: No models supporting generateContent found for your API key. Verify key permissions at https://aistudio.google.com/app/apikey");
         }
 
-        log.info("ListModels returned available generateContent models: {}", discoveredModels);
-        System.out.println("[ListModels] Discovered supported models for API key: " + discoveredModels);
-
-        // 6. Invoke Google Gemini Chat Model using the first dynamically discovered model
+        // 6. Invoke Google Gemini Chat Model
         String aiAnswer = null;
         Exception lastException = null;
-        String modelNameUsed = null;
 
         for (String candidateModel : discoveredModels) {
             try {
@@ -186,8 +255,7 @@ public class PdfRagService {
 
                 aiAnswer = geminiModel.generate(systemPrompt);
                 if (aiAnswer != null && !aiAnswer.trim().isEmpty()) {
-                    modelNameUsed = candidateModel;
-                    this.activeModelUsed = "Google Gemini (" + candidateModel + ")";
+                    session.setActiveModelUsed("Google Gemini (" + candidateModel + ")");
                     break;
                 }
             } catch (Exception e) {
@@ -204,22 +272,19 @@ public class PdfRagService {
         }
 
         // 7. Update Session Stats
-        this.questionsAskedCount++;
+        session.incrementQuestionsAskedCount();
         
-        recentQuestions.remove(question.trim());
-        recentQuestions.addFirst(question.trim());
-        while (recentQuestions.size() > 5) {
-            recentQuestions.removeLast();
+        LinkedList<String> recent = session.getRecentQuestions();
+        recent.remove(question.trim());
+        recent.addFirst(question.trim());
+        while (recent.size() > 5) {
+            recent.removeLast();
         }
 
-        StatsResponse stats = getStats();
+        StatsResponse stats = getStats(sessionId);
         return new AskResponse(question, aiAnswer, retrievedSnippets, stats);
     }
 
-    /**
-     * Dynamically queries the Google AI Studio ListModels API (v1beta) and returns
-     * all model names supporting content generation for the provided API Key.
-     */
     private List<String> queryListModels(String apiKey) {
         List<String> supportedModels = new ArrayList<>();
         String url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey;
@@ -247,7 +312,6 @@ public class PdfRagService {
 
                         if (supportsGenerate && rawName.startsWith("models/")) {
                             String modelIdentifier = rawName.substring("models/".length());
-                            // Exclude specialized preview/embedding/imagen models if standard chat is desired
                             if (modelIdentifier.contains("gemini") && !modelIdentifier.contains("embedding") && !modelIdentifier.contains("robotics")) {
                                 supportedModels.add(modelIdentifier);
                             }
@@ -263,28 +327,25 @@ public class PdfRagService {
     }
 
     /**
-     * Returns current project dashboard statistics.
+     * Returns project statistics for a specific user session.
      */
-    public synchronized StatsResponse getStats() {
+    public StatsResponse getStats(String sessionId) {
+        UserSessionData session = getSession(sessionId);
         return new StatsResponse(
-                this.pdfUploaded,
-                this.currentFileName,
-                this.questionsAskedCount,
-                this.chunksCount,
-                this.activeModelUsed,
-                new ArrayList<>(this.recentQuestions)
+                session.isPdfUploaded(),
+                session.getCurrentFileName(),
+                session.getQuestionsAskedCount(),
+                session.getChunksCount(),
+                session.getActiveModelUsed(),
+                new ArrayList<>(session.getRecentQuestions())
         );
     }
 
     /**
-     * Resets session state and stats.
+     * Resets session state and stats for a specific user session.
      */
-    public synchronized void resetSession() {
-        this.pdfUploaded = false;
-        this.currentFileName = null;
-        this.chunksCount = 0;
-        this.questionsAskedCount = 0;
-        this.activeModelUsed = "Google Gemini (Auto-Discovered)";
-        this.recentQuestions.clear();
+    public void resetSession(String sessionId) {
+        UserSessionData session = getSession(sessionId);
+        session.reset();
     }
 }
