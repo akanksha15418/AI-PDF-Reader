@@ -4,11 +4,8 @@
 FROM maven:3.9.8-eclipse-temurin-21-alpine AS builder
 WORKDIR /app
 
-# Copy Maven pom.xml and resolve dependencies for layer caching
-COPY . .
-RUN mvn clean package -DskipTests
-
-# Copy project source code and build production jar
+# Copy Maven pom.xml and source code
+COPY pom.xml .
 COPY src ./src
 RUN mvn clean package -DskipTests
 
@@ -17,6 +14,9 @@ RUN mvn clean package -DskipTests
 # ==========================================
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
+
+# Install native C++ libraries required by ONNX Runtime (libstdc++.so.6) on Alpine Linux
+RUN apk add --no-cache libstdc++ gcompat
 
 # Security: Create non-root user for container execution
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

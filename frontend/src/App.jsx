@@ -5,7 +5,7 @@ import {
   X, Layers, MessageSquare, ChevronDown, ChevronUp 
 } from 'lucide-react';
 
-const API_BASE = '';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
 export default function App() {
   // State variables
