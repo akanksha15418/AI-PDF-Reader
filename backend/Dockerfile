@@ -15,19 +15,15 @@ RUN mvn clean package -DskipTests
 FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 
-# Security: Create non-root user for container execution
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+# Ensure /tmp directory is writable for ONNX native library extraction
+RUN chmod 1777 /tmp
 
 # Copy compiled jar artifact from builder stage
 COPY --from=builder /app/target/*.jar app.jar
 
-# Set ownership and switch to non-root user
-RUN chown -R appuser:appgroup /app
-USER appuser
-
 # Default PORT environment variable (Render sets this dynamically at runtime)
 ENV PORT=8080
-ENV JAVA_OPTS="-Xms64m -Xmx256m -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=64m -Xss256k -XX:+UseSerialGC"
+ENV JAVA_OPTS="-Xms128m -Xmx320m -XX:+UseSerialGC"
 
 # Expose HTTP port
 EXPOSE 8080
